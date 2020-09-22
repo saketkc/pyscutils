@@ -4,10 +4,10 @@
 
 
 import unittest
+
 from click.testing import CliRunner
 
-from pyscutils import pyscutils
-from pyscutils import cli
+from pyscutils import cli, pyscutils
 
 
 class TestPyscutils(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestPyscutils(unittest.TestCase):
         runner = CliRunner()
         result = runner.invoke(cli.main)
         assert result.exit_code == 0
-        assert 'pyscutils.cli.main' in result.output
-        help_result = runner.invoke(cli.main, ['--help'])
+        assert "pyscutils.cli.main" in result.output
+        help_result = runner.invoke(cli.main, ["--help"])
         assert help_result.exit_code == 0
-        assert '--help  Show this message and exit.' in help_result.output
+        assert "--help  Show this message and exit." in help_result.output
