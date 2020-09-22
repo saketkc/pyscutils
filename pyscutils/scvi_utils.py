@@ -1554,6 +1554,8 @@ def do_vae(
     legend_loc="on data",
     figsize=(10, 5),
     legend_fontweight="normal",
+    sct_cell_pars=None,
+    outdir=None,
 ):
     n_epochs = 400
     lr = 1e-3
@@ -1626,11 +1628,6 @@ def do_vae(
 
     fig1 = plt.figure(figsize=figsize)
     ax = fig1.add_subplot(121)
-    print("gene_mean shape: {}".format(gene_mean.shape))
-    print("cell_mean shape: {}".format(cell_mean.shape))
-
-    print("gene_loss shape: {}".format(gene_loss.shape))
-    print("cell_loss shape: {}".format(cell_loss.shape))
 
     ax.scatter(
         gene_mean, gene_loss, label="Gene", alpha=0.5, color="black", s=point_size
@@ -1658,8 +1655,8 @@ def do_vae(
         ax=ax,
         size=point_size,
         legend_loc=legend_loc,
-    )  # palette=COLORS)
-    title = "{} | Genewise | disp {} | {} | ldvae = {}({}) | n_enc = {} | c_ofst = {} | g_ofst = {}".format(
+    )
+    title = "{} | Genewise | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
         title_prefix,
         dispersion,
         reconstruction_loss,
@@ -1672,14 +1669,12 @@ def do_vae(
     fig1.suptitle(title)
     fig1.tight_layout(rect=[0, 0.03, 1, 0.95])
     title = title.replace(" ", "").replace("=", "_")
-    fig1.savefig("../../../plots/18_PBMC33k/{}.pdf".format(title))
-    # fig1.savefig("../../../plots/16_PBMC3k_Zinb/{}.png".format(title))
+    if outdir:
+        fig1.savefig(os.path.join(outdir, "{}.pdf".format(title)))
 
     fig2 = plt.figure(figsize=figsize)
     ax = fig2.add_subplot(121)
-    ax.scatter(
-        cell_mean, cell_loss, label="Cell", alpha=0.5, s=point_size
-    )  #               color=CELLS_COLORS)
+    ax.scatter(cell_mean, cell_loss, label="Cell", alpha=0.5, s=point_size)
     ax.set_xlabel("Mean counts")
     ax.set_ylabel("Reconstuction loss")
     ax.legend(scatterpoints=1)
@@ -1693,10 +1688,9 @@ def do_vae(
         legend_loc=legend_loc,
         legend_fontweight=legend_fontweight,
         size=point_size,
-    )  # , palette=COLORS
-    # )
+    )
 
-    title = "{} | Cellwise | disp {}| {} | ldvae = {}({}) | n_enc = {} | c_ofst = {} | g_ofst = {}".format(
+    title = "{} | Cellwise | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
         title_prefix,
         dispersion,
         reconstruction_loss,
@@ -1711,10 +1705,48 @@ def do_vae(
     fig2.tight_layout(rect=[0, 0.03, 1, 0.95])
     title = title.replace(" ", "").replace("=", "_")
 
-    fig2.savefig("../../../plots/18_PBMC33k/{}.pdf".format(title))
-    # fig2.savefig("../../../plots/16_PBMC3k_Zinb/{}.png".format(title))
+    if outdir:
+        fig2.savefig(os.path.join(outdir, "{}.pdf".format(title)))
 
-    title = "{} | Libsize | disp {} | {} | ldvae = {}({}) | n_enc = {} | c_ofst = {} | g_ofst = {}".format(
+    if outdir:
+        model_name = "{} | Posterior | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+            title_prefix,
+            dispersion,
+            reconstruction_loss,
+            ldvae,
+            ldvae_bias,
+            n_encoder,
+            cell_offset,
+            gene_offset,
+        )
+        scvi_posterior.save_posterior(
+            os.path.join(outdir, model_name.replace(" ", "") + ".posterior")
+        )
+
+    if sct_cell_pars is None:
+        fig1.show()
+        fig2.show()
+        obj_to_return = (
+            scvi_posterior,
+            scvi_latent,
+            scvi_vae,
+            scvi_trainer,
+            fig1,
+            fig2,
+            None,
+        )
+        titles_to_return = (
+            "posterior",
+            "latent",
+            "vae",
+            "trainer",
+            "cellwise_plot",
+            "genewise_plot",
+            "libsize_plot",
+        )
+        return dict(zip(titles_to_return, obj_to_return))
+
+    title = "{} | Libsize | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
         title_prefix,
         dispersion,
         reconstruction_loss,
@@ -1725,15 +1757,12 @@ def do_vae(
         gene_offset,
     )
     library_sizes = pd.DataFrame(scvi_posterior.get_stats())
-    sct_library_sizes = pd.read_csv(
-        "../../../data//pbmc33k/SCT_cell_pars.tsv", sep="\t"
-    )
+    sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
     library_sizes.index = adata.obs_names
     library_sizes.columns = ["scvi_libsize"]
     library_sizes["scvi_loglibsize"] = np.log10(library_sizes["scvi_libsize"])
     library_size_df = library_sizes.join(sct_library_sizes)
 
-    # fig, ax = plt.subplots(figsize=(4, 4))
     fig3 = plt.figure(figsize=(10, 5))
     ax = fig3.add_subplot(121)
     ax.scatter(
@@ -1744,8 +1773,6 @@ def do_vae(
     )
     ax.set_xlabel("log_umi")
     ax.set_ylabel("scvi_libsize")
-    # ax.set_title(title)
-    # fig.tight_layout()
 
     ax = fig3.add_subplot(122)
     sc.pl.umap(
@@ -1756,30 +1783,33 @@ def do_vae(
         legend_fontweight=legend_fontweight,
         legend_loc=legend_loc,
         size=point_size,
-    )  # , palette=COLORS
-    # )
+    )
     fig3.suptitle(title)
     fig3.tight_layout(rect=[0, 0.03, 1, 0.95])
     title = title.replace(" ", "").replace("=", "_")
-
-    fig3.savefig("../../../plots/18_PBMC33k/{}.pdf".format(title))
+    if outdir:
+        fig3.savefig(os.path.join(outdir, "{}.pdf".format(title)))
 
     fig1.show()
     fig2.show()
     fig3.show()
 
-    model_name = "{} | Posterior | disp {} | {} | ldvae = {}({}) | n_enc = {} | c_ofst = {} | g_ofst = {}".format(
-        title_prefix,
-        dispersion,
-        reconstruction_loss,
-        ldvae,
-        ldvae_bias,
-        n_encoder,
-        cell_offset,
-        gene_offset,
+    obj_to_return = (
+        scvi_posterior,
+        scvi_latent,
+        scvi_vae,
+        scvi_trainer,
+        fig1,
+        fig2,
+        fig3,
     )
-    scvi_posterior.save_posterior(
-        "../../../plots/18_PBMC33k/" + model_name.replace(" ", "") + ".posterior"
+    titles_to_return = (
+        "posterior",
+        "latent",
+        "vae",
+        "trainer",
+        "cellwise_plot",
+        "genewise_plot",
+        "libsize_plot",
     )
-
-    return scvi_posterior, scvi_latent, scvi_vae, scvi_trainer, fig1, fig2
+    return dict(zip(titles_to_return, obj_to_return))
