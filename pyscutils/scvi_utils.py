@@ -1,8 +1,11 @@
+import os
 import warnings
 
 warnings.simplefilter("ignore")
 from typing import Dict, Iterable, List, Tuple
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import proplot
 import scanpy as sc
@@ -14,11 +17,13 @@ from adjustText import adjust_text
 from scvi import set_seed
 from scvi.dataset import AnnDatasetFromAnnData
 from scvi.inference import UnsupervisedTrainer, load_posterior
-from scvi.models.distributions import (NegativeBinomial, Poisson,
-                                       ZeroInflatedNegativeBinomial)
+from scvi.models.distributions import (
+    NegativeBinomial,
+    Poisson,
+    ZeroInflatedNegativeBinomial,
+)
 from scvi.models.log_likelihood import log_nb_positive, log_zinb_positive
-from scvi.models.modules import (DecoderSCVI, Encoder, FCLayers,
-                                 LinearDecoderSCVI)
+from scvi.models.modules import DecoderSCVI, Encoder, FCLayers, LinearDecoderSCVI
 from scvi.models.vae import LDVAE, VAE
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
@@ -1535,7 +1540,7 @@ def compute_scvi_latent(
     return posterior, latent, vae, trainer
 
 
-def do_vae(
+def RunVAE(
     adata,
     reconstruction_loss,
     n_latent=30,
@@ -1557,9 +1562,6 @@ def do_vae(
     sct_cell_pars=None,
     outdir=None,
 ):
-    n_epochs = 400
-    lr = 1e-3
-    use_cuda = True
 
     scvi_posterior, scvi_latent, scvi_vae, scvi_trainer = compute_scvi_latent(
         adata,
@@ -1670,6 +1672,7 @@ def do_vae(
     fig1.tight_layout(rect=[0, 0.03, 1, 0.95])
     title = title.replace(" ", "").replace("=", "_")
     if outdir:
+        os.makedirs(outdir, exist_ok=True)
         fig1.savefig(os.path.join(outdir, "{}.pdf".format(title)))
 
     fig2 = plt.figure(figsize=figsize)
