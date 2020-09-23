@@ -2,6 +2,7 @@ import os
 import warnings
 
 warnings.simplefilter("ignore")
+import shutil
 from typing import Dict, Iterable, List, Tuple
 
 import matplotlib.pyplot as plt
@@ -710,7 +711,7 @@ def compute_scvi_latent(
     adata: sc.AnnData,
     n_latent: int = 50,
     n_encoder: int = 1,
-    n_epochs: int = 100,
+    n_epochs: int = 200,
     lr: float = 1e-3,
     use_batches: bool = False,
     use_cuda: bool = False,
@@ -1464,7 +1465,7 @@ def compute_scvi_latent(
     adata: sc.AnnData,
     n_latent: int = 50,
     n_encoder: int = 1,
-    n_epochs: int = 100,
+    n_epochs: int = 200,
     lr: float = 1e-3,
     use_batches: bool = False,
     use_cuda: bool = False,
@@ -1548,12 +1549,13 @@ def RunVAE(
     linear=False,
     cell_offset="none",
     gene_offset="none",
+    ldvae=False,
     ldvae_bias=False,
     title_prefix="",
     dispersion="gene",
     hvg_genes=None,
     point_size=5,
-    n_epochs=400,
+    n_epochs=200,
     lr=1e-3,
     use_cuda=True,
     legend_loc="on data",
@@ -1722,6 +1724,11 @@ def RunVAE(
             cell_offset,
             gene_offset,
         )
+        # scVI explicitly asks this path to be empty
+        shutil.rmtree(
+            os.path.join(outdir, model_name.replace(" ", "") + ".posterior"),
+            ignore_errors=True,
+        )
         scvi_posterior.save_posterior(
             os.path.join(outdir, model_name.replace(" ", "") + ".posterior")
         )
@@ -1816,3 +1823,42 @@ def RunVAE(
         "libsize_plot",
     )
     return dict(zip(titles_to_return, obj_to_return))
+
+
+def RunSCVI(
+    counts_dir,
+    metadata_file,
+    sct_cell_pars,
+    idents_col="phenoid",
+    reconstruction_loss="nb",
+    dispersion="gene-cell",
+    cell_offset="none",
+    gene_offset="none",
+    n_encoder=1,
+    hvg_genes=3000,
+    ldvae=False,
+    ldvae_bias=False,
+    use_cuda=True,
+    lr=1e-3,
+):
+    adata = sc.read_10x_mtx(counts_dir)
+    metadata = pd.read_csv(metadata_file, sep="\t", index_col=0)
+    adata.obs["named_clusters"] = metadata[idents_col]
+    n_epochs = np.min([round((20000 / adata.n_obs) * 400), 400])
+
+    results = RunVAE(
+        adata,
+        reconstruction_loss,
+        linear=ldvae,
+        n_encoder=n_encoder,
+        cell_offset=cell_offset,
+        gene_offset=gene_offset,
+        hvg_genes=hvg_genes,
+        n_epochs=n_epochs,
+        lr=lr,
+        dispersion=dispersion,
+        use_cuda=use_cuda,
+        sct_cell_pars=sct_cell_pars,
+        outdir=outdir,
+    )
+    return results
