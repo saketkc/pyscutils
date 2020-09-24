@@ -1547,6 +1547,7 @@ def RunVAE(
     point_size=5,
     n_epochs=200,
     lr=1e-3,
+    batch_size=1000,
     use_cuda=True,
     legend_loc="on data",
     figsize=(10, 5),
@@ -1568,15 +1569,26 @@ def RunVAE(
         dispersion=dispersion,
         hvg_genes=hvg_genes,
     )
+
+    suffix = "_{}_{}_{}_{}".format(
+        cell_offset, gene_offset, reconstruction_loss, dispersion
+    )
     scviDataset = AnnDatasetFromAnnData(adata)
     if hvg_genes:
         scviDataset.subsample_genes(hvg_genes)
 
-    scale = scvi_posterior.get_sample_scale()
-    dropout, means, dispersions = scvi_posterior.generate_parameters()
+    # posterior freq of genes per cell
+    scale = scvi_posterior.sequential(batch_size=batch_size).get_sample_scale()
+    dropout, means, dispersions = scvi_posterior.sequential().generate_parameters()
+    # batch_size=batch_size
     for _ in range(99):
         scale += scvi_posterior.get_sample_scale()
-        dropout_x, means_x, dispersions_x = scvi_posterior.generate_parameters()
+        (
+            dropout_x,
+            means_x,
+            dispersions_x,
+        ) = scvi_posterior.sequential().generate_parameters()
+        # batch_size=batch_size
         dropout += dropout_x
         means += means_x
         dispersions += dispersions_x
@@ -1596,7 +1608,7 @@ def RunVAE(
     means_df.columns = list(scviDataset.gene_ids)
     means_df = means_df.T
 
-    dropout_df = pd.DataFram(dropout)
+    dropout_df = pd.DataFrame(dropout)
     dropout_df.index = list(adata.obs_names)
     dropout_df.columns = list(scviDataset.gene_ids)
     dropout_df = dropout_df.T
@@ -1604,7 +1616,7 @@ def RunVAE(
     scvi_latent_df = pd.DataFrame(scvi_latent)
     scvi_latent_df.index = list(adata.obs_names)
 
-    dispersions_df = pd.DataFrame(dispersions_df)
+    dispersions_df = pd.DataFrame(dispersions[0])
     dispersions_df.index = list(adata.obs_names)
     dispersions_df.columns = list(scviDataset.gene_ids)
     dispersions_df = dispersions_df.T
@@ -1612,25 +1624,31 @@ def RunVAE(
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         scale_df.to_csv(
-            os.path.join(outdir, "SCVI_scale_df.tsv"), sep="\t", index=True, header=True
+            os.path.join(outdir, "SCVI_scale_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
         )
         means_df.to_csv(
-            os.path.join(outdir, "SCVI_means_df.tsv"), sep="\t", index=True, header=True
+            os.path.join(outdir, "SCVI_means_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
         )
         dropout_df.to_csv(
-            os.path.join(outdir, "SCVI_dropout_df.tsv"),
+            os.path.join(outdir, "SCVI_dropout_df_{}.tsv".format(suffix)),
             sep="\t",
             index=True,
             header=True,
         )
         scvi_latent_df.to_csv(
-            os.path.join(outdir, "SCVI_latent_df.tsv"),
+            os.path.join(outdir, "SCVI_latent_df_{}.tsv".format(suffix)),
             sep="\t",
             index=True,
             header=True,
         )
         dispersions_df.to_csv(
-            os.path.join(outdir, "SCVI_dispersions_df.tsv"),
+            os.path.join(outdir, "SCVI_dispersions_df_{}.tsv".format(suffix)),
             sep="\t",
             index=True,
             header=True,
