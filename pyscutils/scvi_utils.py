@@ -575,12 +575,7 @@ class VAEGeneCell(nn.Module):
         ).sum(dim=1)
         kl_divergence = kl_divergence_z
 
-        reconst_loss = self.get_reconstruction_loss(
-            x,
-            px_rate,
-            px_r,
-            px_dropout,
-        )
+        reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
 
         return reconst_loss + kl_divergence_l, kl_divergence, 0.0
 
@@ -1329,12 +1324,7 @@ class VAEGeneCell(nn.Module):
         ).sum(dim=1)
         kl_divergence = kl_divergence_z
 
-        reconst_loss = self.get_reconstruction_loss(
-            x,
-            px_rate,
-            px_r,
-            px_dropout,
-        )
+        reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
 
         return reconst_loss + kl_divergence_l, kl_divergence, 0.0
 
@@ -1578,10 +1568,73 @@ def RunVAE(
         dispersion=dispersion,
         hvg_genes=hvg_genes,
     )
+    scviDataset = AnnDatasetFromAnnData(adata)
+    if hvg_genes:
+        scviDataset.subsample_genes(hvg_genes)
+
     scale = scvi_posterior.get_sample_scale()
-    for _ in range(9):
+    dropout, means, dispersions = scvi_posterior.generate_parameters()
+    for _ in range(99):
         scale += scvi_posterior.get_sample_scale()
-    scale /= 10
+        dropout_x, means_x, dispersions_x = scvi_posterior.generate_parameters()
+        dropout += dropout_x
+        means += means_x
+        dispersions += dispersions_x
+
+    scale /= 100
+    dropout /= 100
+    means /= 100
+    dispersions /= 100
+
+    scale_df = pd.DataFrame(scale)
+    scale_df.index = list(adata.obs_names)
+    scale_df.columns = list(scviDataset.gene_ids)
+    scale_df = scale_df.T
+
+    means_df = pd.DataFrame(means)
+    means_df.index = list(adata.obs_names)
+    means_df.columns = list(scviDataset.gene_ids)
+    means_df = means_df.T
+
+    dropout_df = pd.DataFram(dropout)
+    dropout_df.index = list(adata.obs_names)
+    dropout_df.columns = list(scviDataset.gene_ids)
+    dropout_df = dropout_df.T
+
+    scvi_latent_df = pd.DataFrame(scvi_latent)
+    scvi_latent_df.index = list(adata.obs_names)
+
+    dispersions_df = pd.DataFrame(dispersions_df)
+    dispersions_df.index = list(adata.obs_names)
+    dispersions_df.columns = list(scviDataset.gene_ids)
+    dispersions_df = dispersions_df.T
+
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+        scale_df.to_csv(
+            os.path.join(outdir, "SCVI_scale_df.tsv"), sep="\t", index=True, header=True
+        )
+        means_df.to_csv(
+            os.path.join(outdir, "SCVI_means_df.tsv"), sep="\t", index=True, header=True
+        )
+        dropout_df.to_csv(
+            os.path.join(outdir, "SCVI_dropout_df.tsv"),
+            sep="\t",
+            index=True,
+            header=True,
+        )
+        scvi_latent_df.to_csv(
+            os.path.join(outdir, "SCVI_latent_df.tsv"),
+            sep="\t",
+            index=True,
+            header=True,
+        )
+        dispersions_df.to_csv(
+            os.path.join(outdir, "SCVI_dispersions_df.tsv"),
+            sep="\t",
+            index=True,
+            header=True,
+        )
 
     adata.obsm["X_scvi"] = scvi_latent
 
@@ -1608,17 +1661,11 @@ def RunVAE(
     # torch.cuda.empty_cache()
     if reconstruction_loss == "nb":
         reconst_loss = log_nb_positive(
-            X,
-            inference["px_rate"],
-            inference["px_r"],
-            inference["px_dropout"],
+            X, inference["px_rate"], inference["px_r"], inference["px_dropout"],
         )
     elif reconstruction_loss == "zinb":
         reconst_loss = log_zinb_positive(
-            X,
-            inference["px_rate"],
-            inference["px_r"],
-            inference["px_dropout"],
+            X, inference["px_rate"], inference["px_r"], inference["px_dropout"],
         )
 
     gene_loss = np.nansum(reconst_loss.detach().cpu().numpy(), axis=0)
@@ -1676,6 +1723,7 @@ def RunVAE(
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         fig1.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig1.savefig(os.path.join(outdir, "{}.png".format(title)))
 
     fig2 = plt.figure(figsize=figsize)
     ax = fig2.add_subplot(121)
@@ -1712,6 +1760,7 @@ def RunVAE(
 
     if outdir:
         fig2.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig2.savefig(os.path.join(outdir, "{}.png".format(title)))
 
     if outdir:
         model_name = "{} | Posterior | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
@@ -1799,6 +1848,7 @@ def RunVAE(
     title = title.replace(" ", "").replace("=", "_")
     if outdir:
         fig3.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig3.savefig(os.path.join(outdir, "{}.png".format(title)))
 
     fig1.show()
     fig2.show()
@@ -1829,6 +1879,8 @@ def RunSCVI(
     counts_dir,
     metadata_file,
     sct_cell_pars,
+    outdir,
+    title_prefix="",
     idents_col="phenoid",
     reconstruction_loss="nb",
     dispersion="gene-cell",
@@ -1850,6 +1902,7 @@ def RunSCVI(
         adata,
         reconstruction_loss,
         linear=ldvae,
+        title_prefix=title_prefix,
         n_encoder=n_encoder,
         cell_offset=cell_offset,
         gene_offset=gene_offset,
