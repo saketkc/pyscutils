@@ -160,6 +160,9 @@ class DecoderSCVI(nn.Module):
             nn.Linear(n_hidden, n_output), nn.Softmax(dim=-1)
         )
 
+        # Beta1 parameter for coefficient of library size
+        self.beta1_decoder = nn.Linear(n_hidden, n_output)
+
         # dispersion: here we only deal with gene-cell dispersion case
         self.px_r_decoder = nn.Linear(n_hidden, n_output)
 
@@ -200,10 +203,11 @@ class DecoderSCVI(nn.Module):
         px = self.px_decoder(z, *cat_list)
         px_scale = self.px_scale_decoder(px)
         px_dropout = self.px_dropout_decoder(px)
+        beta1 = self.beta1_decoder(px)
         # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability)
-        px_rate = (torch.exp(library)) * px_scale  # torch.clamp( , max=12)
+        px_rate = (torch.exp(library ** beta1)) * px_scale  # torch.clamp( , max=12)
         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
-        return px_scale, px_r, px_rate, px_dropout
+        return px_scale, px_r, px_rate, px_dropout, beta1
 
 
 ## Modifications from scVI code marked with '################ ===>'
@@ -282,13 +286,14 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         # The decoder returns values for the parameters of the ZINB distribution
         px = self.px_decoder(z, *cat_list)
         px_scale = self.px_scale_decoder(px)
+        beta1 = self.beta1_decoder(px)
         px_dropout = self.px_dropout_decoder(px)
         # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability
         ################ ===>
         cell_offset = torch.reshape(cell_offset, (cell_offset.shape[0], 1))
 
         px_rate = (
-            (torch.exp(library) * (cell_offset)) * px_scale * gene_offset
+            (torch.exp(library) * (cell_offset * beta1)) * px_scale * gene_offset
         )  # torch.clamp( , max=12)
         px_rate = (
             (torch.exp(library) * (cell_offset)) * px_scale * gene_offset
@@ -298,7 +303,7 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
         if dispersion == "gene-cell" and dispersion_clamp:
             px_r = torch.clamp(px_r, min=dispersion_clamp[0], max=dispersion_clamp[1])
-        return px_scale, px_r, px_rate, px_dropout
+        return px_scale, px_r, px_rate, px_dropout, beta1
 
 
 class LinearDecoderSCVIGeneCell(nn.Module):
@@ -681,7 +686,7 @@ class VAEGeneCell(nn.Module):
         elif self.gene_offset == "mean":
             gene_offset = torch.mean(x, dim=0)
 
-        px_scale, px_r, px_rate, px_dropout = self.decoder(
+        px_scale, px_r, px_rate, px_dropout, beta1 = self.decoder(
             self.dispersion,
             z,
             library,
@@ -701,6 +706,23 @@ class VAEGeneCell(nn.Module):
             px_r = self.px_r
         px_r = torch.exp(px_r)
 
+        mean = torch.zeros_like(qz_m)
+        scale = torch.ones_like(qz_v)
+
+        kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale))
+        # .sum(
+        #    dim=1
+        # )
+        # kl_divergence_l = kl(
+        #    Normal(ql_m, torch.sqrt(ql_v)),
+        #    Normal(local_l_mean, torch.sqrt(local_l_var)),
+        # ).sum(dim=1)
+
+        # print("kl_l shape: {}".format(ql_m.shape))
+        kl_divergence = kl_divergence_z
+
+        reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
+
         return dict(
             px_scale=px_scale,
             px_r=px_r,
@@ -712,6 +734,10 @@ class VAEGeneCell(nn.Module):
             ql_m=ql_m,
             ql_v=ql_v,
             library=library,
+            beta1=beta1,
+            # kl_divergence_l=kl_divergence_l,
+            kl_divergence_z=kl_divergence_z,
+            reconstruction_loss=reconst_loss,
         )
 
     def forward(
@@ -757,16 +783,42 @@ class VAEGeneCell(nn.Module):
         kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)).sum(
             dim=1
         )
+        # print("kl_z divergence shape: {}".format(kl_divergence_z.shape))
+        # print("qz_m shape: {}".format(qz_m.shape))
+        # print("ql_m shape: {}".format(ql_m.shape))
         kl_divergence_l = kl(
             Normal(ql_m, torch.sqrt(ql_v)),
             Normal(local_l_mean, torch.sqrt(local_l_var)),
         ).sum(dim=1)
 
+        # print("kl_l shape: {}".format(ql_m.shape))
         kl_divergence = kl_divergence_z
 
         reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
 
         return reconst_loss + kl_divergence_l, kl_divergence, 0.0
+
+    @torch.no_grad()
+    def get_loadings(self) -> np.ndarray:
+        """Extract per-gene weights (for each Z, shape is genes by dim(Z)) in the linear decoder.
+        # This is BW, where B is diag(b) batch norm, W is weight matrix
+        if self.use_batch_norm is True:
+            w = self.decoder.factor_regressor.fc_layers[0][0].weight
+            bn = self.decoder.factor_regressor.fc_layers[0][1]
+            sigma = torch.sqrt(bn.running_var + bn.eps)
+            gamma = bn.weight
+            b = gamma / sigma
+            bI = torch.diag(b)
+            loadings = torch.matmul(bI, w)
+        else:
+            loadings = self.decoder.factor_regressor.fc_layers[0][0].weight
+        loadings = loadings.detach().cpu().numpy()
+        if self.n_batch > 1:
+            loadings = loadings[:, : -self.n_batch]
+        """
+        loadings = self.decoder.parameters()
+
+        return loadings
 
 
 class LDVAEGeneCell(VAEGeneCell):
@@ -1279,6 +1331,7 @@ def RunVAE(
             scvi_latent,
             scvi_vae,
             scvi_trainer,
+            inference,
             fig1,
             fig2,
             None,
@@ -1288,6 +1341,7 @@ def RunVAE(
             "latent",
             "vae",
             "trainer",
+            "inference",
             "cellwise_plot",
             "genewise_plot",
             "libsize_plot",
@@ -1346,6 +1400,7 @@ def RunVAE(
     means_df = []
     dropout_df = []
     dispersion_df = []
+    beta1 = []
 
     for tensors in scvi_posterior.sequential(batch_size=batch_size):
         sample_batch, _, _, batch_index, labels = tensors
@@ -1356,14 +1411,22 @@ def RunVAE(
         px_r = outputs["px_r"].detach().cpu().numpy()
         px_rate = outputs["px_rate"].detach().cpu().numpy()
         px_dropout = outputs["px_dropout"].detach().cpu().numpy()
+        beta = outputs["beta1"].detach().cpu().numpy()
 
         dropout_df.append(px_dropout)
         dispersion_df.append(px_r)
         means_df.append(px_rate)
 
+        beta1.append(beta)
+
     dropout_df = pd.DataFrame(np.vstack(dropout_df))
     dispersion_df = pd.DataFrame(np.vstack(dispersion_df))
     means_df = pd.DataFrame(np.vstack(means_df))
+    beta1_df = pd.DataFrame(np.vstack(beta1))
+
+    beta1_df.index = list(adata.obs_names)
+    beta1_df.columns = list(scviDataset.gene_names)
+    beta1_df = beta1_df.T
 
     means_df.index = list(adata.obs_names)
     means_df.columns = list(scviDataset.gene_names)
@@ -1378,6 +1441,12 @@ def RunVAE(
     dispersion_df = dispersion_df.T
     if outdir:
         os.makedirs(outdir, exist_ok=True)
+        beta1_df.to_csv(
+            os.path.join(outdir, "SCVI_beta1_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
+        )
         means_df.to_csv(
             os.path.join(outdir, "SCVI_means_df_{}.tsv".format(suffix)),
             sep="\t",
@@ -1402,6 +1471,7 @@ def RunVAE(
         scvi_latent,
         scvi_vae,
         scvi_trainer,
+        inference,
         fig1,
         fig2,
         fig3,
@@ -1411,6 +1481,7 @@ def RunVAE(
         "latent",
         "vae",
         "trainer",
+        "inference",
         "cellwise_plot",
         "genewise_plot",
         "libsize_plot",
@@ -1418,7 +1489,7 @@ def RunVAE(
     return dict(zip(titles_to_return, obj_to_return))
 
 
-def RunSCVI(
+def RunSCVILoadings(
     counts_dir,
     metadata_file,
     sct_cell_pars,
