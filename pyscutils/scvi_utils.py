@@ -764,7 +764,12 @@ class VAEGeneCell(nn.Module):
 
         kl_divergence = kl_divergence_z
 
-        reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
+        reconst_loss = self.get_reconstruction_loss(
+            x,
+            px_rate,
+            px_r,
+            px_dropout,
+        )
 
         return reconst_loss + kl_divergence_l, kl_divergence, 0.0
 
@@ -1129,11 +1134,17 @@ def RunVAE(
     # torch.cuda.empty_cache()
     if reconstruction_loss == "nb":
         reconst_loss = log_nb_positive(
-            X, inference["px_rate"], inference["px_r"], inference["px_dropout"],
+            X,
+            inference["px_rate"],
+            inference["px_r"],
+            inference["px_dropout"],
         )
     elif reconstruction_loss == "zinb":
         reconst_loss = log_zinb_positive(
-            X, inference["px_rate"], inference["px_r"], inference["px_dropout"],
+            X,
+            inference["px_rate"],
+            inference["px_r"],
+            inference["px_dropout"],
         )
 
     gene_loss = np.nansum(reconst_loss.detach().cpu().numpy(), axis=0)
