@@ -512,7 +512,9 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         cell_offset = torch.reshape(cell_offset, (cell_offset.shape[0], 1))
         library = torch.tensor(0.0)
         px_rate = (
-            (torch.exp(library) * (cell_offset * beta1)) * px_scale * gene_offset
+            (torch.exp(library) * (cell_offset * torch.exp(beta1)))
+            * px_scale
+            * gene_offset
         )  # torch.clamp( , max=12)
         # px_rate = cell_offset #torch.exp(library) + cell_mean  * px_scale  # torch.clamp( , max=12)
         # px_rate = torch.exp(library + cell_mean) * px_scale  # torch.clamp( , max=12)
@@ -1540,6 +1542,7 @@ def RunVAE(
         px_r = outputs["px_r"].detach().cpu().numpy()
         px_rate = outputs["px_rate"].detach().cpu().numpy()
         px_dropout = outputs["px_dropout"].detach().cpu().numpy()
+        beta = outputs["beta1"].detach().cpu().numpy()
 
         dropout_df.append(px_dropout)
         dispersion_df.append(px_r)
@@ -1562,6 +1565,7 @@ def RunVAE(
     dispersion_df.columns = list(scviDataset.gene_names)
     dispersion_df = dispersion_df.T
 
+    beta1_df = pd.DataFrame(np.vstack(beta1))
     beta1_df.index = list(adata.obs_names)
     beta1_df.columns = list(scviDataset.gene_names)
     beta1_df = beta1_df.T
