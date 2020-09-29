@@ -18,7 +18,8 @@ from adjustText import adjust_text
 from scvi import set_seed
 from scvi.dataset import AnnDatasetFromAnnData
 from scvi.models.utils import one_hot
-from scvi.inference import UnsupervisedTrainer, load_posterior
+
+# from scvi.inference import UnsupervisedTrainer, load_posterior
 from scvi.models.distributions import (
     NegativeBinomial,
     Poisson,
@@ -29,6 +30,224 @@ from scvi.models.modules import DecoderSCVI, Encoder, FCLayers, LinearDecoderSCV
 from scvi.models.vae import LDVAE, VAE
 from torch.distributions import Normal
 from torch.distributions import kl_divergence as kl
+
+
+import logging
+import copy
+from typing import Union, List
+
+import matplotlib.pyplot as plt
+import torch
+from numpy import ceil
+
+from scvi.dataset import GeneExpressionDataset
+from scvi.inference import Trainer
+
+plt.switch_backend("agg")
+logger = logging.getLogger(__name__)
+
+
+class UnsupervisedTrainer(Trainer):
+    """Class for unsupervised training of an autoencoder.
+
+    Parameters
+    ----------
+    model
+        A model instance from class ``VAE``, ``VAEC``, ``SCANVI``, ``AutoZIVAE``
+    gene_dataset
+        A gene_dataset instance like ``CortexDataset()``
+    train_size
+        The train size, a float between 0 and 1 representing proportion of dataset to use for training
+        to use Default: ``0.9``.
+    test_size
+        The test size,  a float between 0 and 1 representing proportion of dataset to use for testing
+        to use Default: ``None``, which is equivalent to data not in the train set. If ``train_size`` and ``test_size``
+        do not add to 1 then the remaining samples are added to a ``validation_set``.
+    **kwargs
+        Other keywords arguments from the general Trainer class.
+
+    Other Parameters
+    ----------------
+    n_epochs_kl_warmup
+        Number of epochs for linear warmup of KL(q(z|x)||p(z)) term. After `n_epochs_kl_warmup`,
+        the training objective is the ELBO. This might be used to prevent inactivity of latent units, and/or to
+        improve clustering of latent space, as a long warmup turns the model into something more of an autoencoder.
+        Be aware that large datasets should avoid this mode and rely on n_iter_kl_warmup. If this parameter is not
+        None, then it overrides any choice of `n_iter_kl_warmup`.
+    n_iter_kl_warmup
+        Number of iterations for warmup (useful for bigger datasets)
+        int(128*5000/400) is a good default value.
+    normalize_loss
+        A boolean determining whether the loss is divided by the total number of samples used for
+        training. In particular, when the global KL divergence is equal to 0 and the division is performed, the loss
+        for a minibatchis is equal to the average of reconstruction losses and KL divergences on the minibatch.
+        Default: ``None``, which is equivalent to setting False when the model is an instance from class
+        ``AutoZIVAE`` and True otherwise.
+
+    Examples
+    --------
+    >>> gene_dataset = CortexDataset()
+    >>> vae = VAE(gene_dataset.nb_genes, n_batch=gene_dataset.n_batches * False,
+    ... n_labels=gene_dataset.n_labels)
+
+    >>> infer = VariationalInference(gene_dataset, vae, train_size=0.5)
+    >>> infer.train(n_epochs=20, lr=1e-3)
+
+    Notes
+    -----
+    Two parameters can help control the training KL annealing
+    If your applications rely on the posterior quality,
+    (i.e. differential expression, batch effect removal), ensure the number of total
+    epochs (or iterations) exceed the number of epochs (or iterations) used for KL warmup
+
+    """
+
+    default_metrics_to_monitor = ["elbo"]
+
+    def __init__(
+        self,
+        model,
+        gene_dataset: GeneExpressionDataset,
+        train_size: Union[int, float] = 0.9,
+        test_size: Union[int, float] = None,
+        n_iter_kl_warmup: Union[int, None] = None,
+        n_epochs_kl_warmup: Union[int, None] = 400,
+        normalize_loss: bool = None,
+        **kwargs,
+    ):
+        train_size = float(train_size)
+        if train_size > 1.0 or train_size <= 0.0:
+            raise ValueError(
+                "train_size needs to be greater than 0 and less than or equal to 1"
+            )
+        super().__init__(model, gene_dataset, **kwargs)
+
+        # Set up number of warmup iterations
+        self.n_iter_kl_warmup = n_iter_kl_warmup
+        self.n_epochs_kl_warmup = n_epochs_kl_warmup
+        self.normalize_loss = (
+            not (
+                hasattr(self.model, "reconstruction_loss")
+                and self.model.reconstruction_loss == "autozinb"
+            )
+            if normalize_loss is None
+            else normalize_loss
+        )
+
+        # Total size of the dataset used for training
+        # (e.g. training set in this class but testing set in AdapterTrainer).
+        # It used to rescale minibatch losses (cf. eq. (8) in Kingma et al., Auto-Encoding Variational Bayes, iCLR 2013)
+        self.n_samples = 1.0
+
+        if type(self) is UnsupervisedTrainer:
+            (
+                self.train_set,
+                self.test_set,
+                self.validation_set,
+            ) = self.train_test_validation(model, gene_dataset, train_size, test_size)
+            self.train_set.to_monitor = ["elbo"]
+            self.test_set.to_monitor = ["elbo"]
+            self.validation_set.to_monitor = ["elbo"]
+            self.n_samples = len(self.train_set.indices)
+
+    @property
+    def posteriors_loop(self):
+        return ["train_set"]
+
+    def loss(self, tensors: List, feed_labels: bool = True):
+        # The next lines should not be modified, because scanVI's trainer inherits
+        # from this class and should NOT include label information to compute the ELBO by default
+        sample_batch, local_l_mean, local_l_var, batch_index, y = tensors
+        # sample_batch, batch_index, y = tensors
+        if not feed_labels:
+            y = None
+        # reconst_loss, kl_divergence_local, kl_divergence_global = self.model(
+        #    sample_batch, local_l_mean, local_l_var, batch_index, y
+        # )
+        reconst_loss, kl_divergence_local, kl_divergence_global = self.model(
+            sample_batch, batch_index, y
+        )
+        loss = (
+            self.n_samples
+            * torch.mean(reconst_loss + self.kl_weight * kl_divergence_local)
+            + kl_divergence_global
+        )
+        if self.normalize_loss:
+            loss = loss / self.n_samples
+        return loss
+
+    @property
+    def kl_weight(self):
+        epoch_criterion = self.n_epochs_kl_warmup is not None
+        iter_criterion = self.n_iter_kl_warmup is not None
+        if epoch_criterion:
+            kl_weight = min(1.0, self.epoch / self.n_epochs_kl_warmup)
+        elif iter_criterion:
+            kl_weight = min(1.0, self.n_iter / self.n_iter_kl_warmup)
+        else:
+            kl_weight = 1.0
+        return kl_weight
+
+    def on_training_begin(self):
+        epoch_criterion = self.n_epochs_kl_warmup is not None
+        iter_criterion = self.n_iter_kl_warmup is not None
+        if epoch_criterion:
+            log_message = "KL warmup for {} epochs".format(self.n_epochs_kl_warmup)
+            if self.n_epochs_kl_warmup > self.n_epochs:
+                logger.info(
+                    "KL warmup phase exceeds overall training phase"
+                    "If your applications rely on the posterior quality, "
+                    "consider training for more epochs or reducing the kl warmup."
+                )
+        elif iter_criterion:
+            log_message = "KL warmup for {} iterations".format(self.n_iter_kl_warmup)
+            n_iter_per_epochs_approx = ceil(
+                self.gene_dataset.nb_cells / self.batch_size
+            )
+            n_total_iter_approx = self.n_epochs * n_iter_per_epochs_approx
+            if self.n_iter_kl_warmup > n_total_iter_approx:
+                logger.info(
+                    "KL warmup phase may exceed overall training phase."
+                    "If your applications rely on posterior quality, "
+                    "consider training for more epochs or reducing the kl warmup."
+                )
+        else:
+            log_message = "Training without KL warmup"
+        logger.info(log_message)
+
+    def on_training_end(self):
+        if self.kl_weight < 0.99:
+            logger.info(
+                "Training is still in warming up phase. "
+                "If your applications rely on the posterior quality, "
+                "consider training for more epochs or reducing the kl warmup."
+            )
+
+
+class AdapterTrainer(UnsupervisedTrainer):
+    def __init__(self, model, gene_dataset, posterior_test, frequency=5):
+        super().__init__(model, gene_dataset, frequency=frequency)
+        self.test_set = posterior_test
+        self.test_set.to_monitor = ["elbo"]
+        self.params = list(self.model.z_encoder.parameters()) + list(
+            self.model.l_encoder.parameters()
+        )
+        self.z_encoder_state = copy.deepcopy(model.z_encoder.state_dict())
+        self.l_encoder_state = copy.deepcopy(model.l_encoder.state_dict())
+        self.n_scale = len(self.test_set.indices)
+
+    @property
+    def posteriors_loop(self):
+        return ["test_set"]
+
+    def train(self, n_path=10, n_epochs=50, **kwargs):
+        for i in range(n_path):
+            # Re-initialize to create new path
+            self.model.z_encoder.load_state_dict(self.z_encoder_state)
+            self.model.l_encoder.load_state_dict(self.l_encoder_state)
+            super().train(n_epochs, params=self.params, **kwargs)
+
+        return min(self.history["elbo_test_set"])
 
 
 ## Modifications from scVI code marked with '################ ===>'
@@ -246,7 +465,7 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         self,
         dispersion: str,
         z: torch.Tensor,
-        library: torch.Tensor,
+        # library: torch.Tensor,
         *cat_list: int,
         cell_offset: torch.Tensor,
         gene_offset: torch.Tensor,
@@ -286,10 +505,7 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         # Clamp to high value: exp(12) ~ 160000 to avoid nans (computational stability
         ################ ===>
         cell_offset = torch.reshape(cell_offset, (cell_offset.shape[0], 1))
-
-        px_rate = (
-            (torch.exp(library) * (cell_offset)) * px_scale * gene_offset
-        )  # torch.clamp( , max=12)
+        library = torch.tensor(0.0)
         px_rate = (
             (torch.exp(library) * (cell_offset)) * px_scale * gene_offset
         )  # torch.clamp( , max=12)
@@ -465,9 +681,9 @@ class VAEGeneCell(nn.Module):
             distribution=latent_distribution,
         )
         # l encoder goes from n_input-dimensional data to 1-d library size
-        self.l_encoder = Encoder(
-            n_input, 1, n_layers=1, n_hidden=n_hidden, dropout_rate=dropout_rate
-        )
+        # self.l_encoder = Encoder(
+        #    n_input, 1, n_layers=1, n_hidden=n_hidden, dropout_rate=dropout_rate
+        # )
         # decoder goes from n_latent-dimensional space to n_input-d data
         ################ ===>
         self.decoder = DecoderSCVIGeneCell(
@@ -530,8 +746,9 @@ class VAEGeneCell(nn.Module):
                 z = qz_m
         return z
 
+    """
     def sample_from_posterior_l(self, x) -> torch.Tensor:
-        """Samples the tensor of library sizes from the posterior
+        Samples the tensor of library sizes from the posterior
 
         Parameters
         ----------
@@ -545,11 +762,12 @@ class VAEGeneCell(nn.Module):
         type
             tensor of shape ``(batch_size, 1)``
 
-        """
+
         if self.log_variational:
             x = torch.log(1 + x)
         ql_m, ql_v, library = self.l_encoder(x)
         return library
+    """
 
     def get_sample_scale(
         self, x, batch_index=None, y=None, n_samples=1, transform_batch=None
@@ -647,7 +865,7 @@ class VAEGeneCell(nn.Module):
 
         # Sampling
         qz_m, qz_v, z = self.z_encoder(x_, y)
-        ql_m, ql_v, library = self.l_encoder(x_)
+        # ql_m, ql_v, library = self.l_encoder(x_)
 
         if n_samples > 1:
             qz_m = qz_m.unsqueeze(0).expand((n_samples, qz_m.size(0), qz_m.size(1)))
@@ -655,9 +873,9 @@ class VAEGeneCell(nn.Module):
             # when z is normal, untran_z == z
             untran_z = Normal(qz_m, qz_v.sqrt()).sample()
             z = self.z_encoder.z_transformation(untran_z)
-            ql_m = ql_m.unsqueeze(0).expand((n_samples, ql_m.size(0), ql_m.size(1)))
-            ql_v = ql_v.unsqueeze(0).expand((n_samples, ql_v.size(0), ql_v.size(1)))
-            library = Normal(ql_m, ql_v.sqrt()).sample()
+            # ql_m = ql_m.unsqueeze(0).expand((n_samples, ql_m.size(0), ql_m.size(1)))
+            # ql_v = ql_v.unsqueeze(0).expand((n_samples, ql_v.size(0), ql_v.size(1)))
+            # library = Normal(ql_m, ql_v.sqrt()).sample()
 
         if transform_batch is not None:
             dec_batch_index = transform_batch * torch.ones_like(batch_index)
@@ -684,7 +902,7 @@ class VAEGeneCell(nn.Module):
         px_scale, px_r, px_rate, px_dropout = self.decoder(
             self.dispersion,
             z,
-            library,
+            # library,
             dec_batch_index,
             y,
             cell_offset=cell_offset,  ################ ===>
@@ -709,14 +927,18 @@ class VAEGeneCell(nn.Module):
             qz_m=qz_m,
             qz_v=qz_v,
             z=z,
-            ql_m=ql_m,
-            ql_v=ql_v,
-            library=library,
+            # ql_m=ql_m,
+            # ql_v=ql_v,
+            # library=library,
         )
 
+    """
     def forward(
         self, x, local_l_mean, local_l_var, batch_index=None, y=None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+
+    def forward(self, x, batch_index=None, y=None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Returns the reconstruction loss and the KL divergences
 
         Parameters
@@ -744,8 +966,8 @@ class VAEGeneCell(nn.Module):
         outputs = self.inference(x, batch_index, y)
         qz_m = outputs["qz_m"]
         qz_v = outputs["qz_v"]
-        ql_m = outputs["ql_m"]
-        ql_v = outputs["ql_v"]
+        # ql_m = outputs["ql_m"]
+        # ql_v = outputs["ql_v"]
         px_rate = outputs["px_rate"]
         px_r = outputs["px_r"]
         px_dropout = outputs["px_dropout"]
@@ -757,11 +979,11 @@ class VAEGeneCell(nn.Module):
         kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)).sum(
             dim=1
         )
-        kl_divergence_l = kl(
-            Normal(ql_m, torch.sqrt(ql_v)),
-            Normal(local_l_mean, torch.sqrt(local_l_var)),
-        ).sum(dim=1)
-
+        # kl_divergence_l = kl(
+        #    Normal(ql_m, torch.sqrt(ql_v)),
+        #    Normal(local_l_mean, torch.sqrt(local_l_var)),
+        # ).sum(dim=1)
+        kl_divergence_l = 0
         kl_divergence = kl_divergence_z
 
         reconst_loss = self.get_reconstruction_loss(x, px_rate, px_r, px_dropout,)
@@ -1294,54 +1516,7 @@ def RunVAE(
         )
         return dict(zip(titles_to_return, obj_to_return))
 
-    title = "{} | Libsize | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
-        title_prefix,
-        dispersion,
-        reconstruction_loss,
-        ldvae,
-        ldvae_bias,
-        n_encoder,
-        cell_offset,
-        gene_offset,
-    )
-    library_sizes = pd.DataFrame(scvi_posterior.get_stats())
-    sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
-    library_sizes.index = adata.obs_names
-    library_sizes.columns = ["scvi_libsize"]
-    library_sizes["scvi_loglibsize"] = np.log10(library_sizes["scvi_libsize"])
-    library_size_df = library_sizes.join(sct_library_sizes)
-
-    fig3 = plt.figure(figsize=(10, 5))
-    ax = fig3.add_subplot(121)
-    ax.scatter(
-        library_size_df["log_umi"],
-        library_size_df["scvi_libsize"],
-        alpha=0.5,
-        s=point_size,
-    )
-    ax.set_xlabel("log_umi")
-    ax.set_ylabel("scvi_libsize")
-
-    ax = fig3.add_subplot(122)
-    sc.pl.umap(
-        adata,
-        color="named_clusters",
-        show=False,
-        ax=ax,
-        legend_fontweight=legend_fontweight,
-        legend_loc=legend_loc,
-        size=point_size,
-    )
-    fig3.suptitle(title)
-    fig3.tight_layout(rect=[0, 0.03, 1, 0.95])
-    title = title.replace(" ", "").replace("=", "_")
-    if outdir:
-        fig3.savefig(os.path.join(outdir, "{}.pdf".format(title)))
-        fig3.savefig(os.path.join(outdir, "{}.png".format(title)))
-
-    fig1.show()
-    fig2.show()
-    fig3.show()
+    # library_sizes = pd.DataFrame(scvi_posterior.get_stats())
 
     means_df = []
     dropout_df = []
@@ -1349,9 +1524,11 @@ def RunVAE(
 
     for tensors in scvi_posterior.sequential(batch_size=batch_size):
         sample_batch, _, _, batch_index, labels = tensors
+        print("doing reference")
         outputs = scvi_posterior.model.inference(
             sample_batch, batch_index=batch_index, y=labels
         )
+        print("done reference")
 
         px_r = outputs["px_r"].detach().cpu().numpy()
         px_rate = outputs["px_rate"].detach().cpu().numpy()
@@ -1376,6 +1553,7 @@ def RunVAE(
     dispersion_df.index = list(adata.obs_names)
     dispersion_df.columns = list(scviDataset.gene_names)
     dispersion_df = dispersion_df.T
+
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         means_df.to_csv(
@@ -1396,6 +1574,52 @@ def RunVAE(
             index=True,
             header=True,
         )
+
+    sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
+    mean_scvi_disp_df = pd.DataFrame(dispersion_df.mean(1), columns=["scvi_dispersion"])
+    sct_disp_df = pd.read_csv(
+        sct_cell_pars.replace("_cell_", "_model_"), sep="\t", index_col=0
+    )
+    joined_df = sct_disp_df.join(mean_scvi_disp_df)
+
+    title = "{} | Dispersion | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+        title_prefix,
+        dispersion,
+        reconstruction_loss,
+        ldvae,
+        ldvae_bias,
+        n_encoder,
+        cell_offset,
+        gene_offset,
+    )
+
+    fig3 = plt.figure(figsize=(10, 5))
+    ax = fig3.add_subplot(121)
+    ax.scatter(joined_df["theta"], joined_df["scvi_dispersion"], alpha=0.5)
+    ax.axline([0, 0], [1, 1], color="gray", linestyle="dashed")
+    ax.set_xlabel("sct_theta")
+    ax.set_ylabel("scvi_theta")
+
+    ax = fig3.add_subplot(122)
+    sc.pl.umap(
+        adata,
+        color="named_clusters",
+        show=False,
+        ax=ax,
+        legend_fontweight=legend_fontweight,
+        legend_loc=legend_loc,
+        size=point_size,
+    )
+    fig3.suptitle(title)
+    fig3.tight_layout(rect=[0, 0.03, 1, 0.95])
+    title = title.replace(" ", "").replace("=", "_")
+    if outdir:
+        fig3.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig3.savefig(os.path.join(outdir, "{}.png".format(title)))
+
+    fig1.show()
+    fig2.show()
+    fig3.show()
 
     obj_to_return = (
         scvi_posterior,
@@ -1418,7 +1642,7 @@ def RunVAE(
     return dict(zip(titles_to_return, obj_to_return))
 
 
-def RunSCVI(
+def RunSCVINoLibSize(
     counts_dir,
     metadata_file,
     sct_cell_pars,
@@ -1427,7 +1651,7 @@ def RunSCVI(
     idents_col="phenoid",
     reconstruction_loss="nb",
     dispersion="gene-cell",
-    cell_offset="none",
+    cell_offset="count",
     gene_offset="none",
     n_encoder=1,
     hvg_genes=3000,
