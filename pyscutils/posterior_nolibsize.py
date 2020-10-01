@@ -344,8 +344,7 @@ class Posterior:
 
     @torch.no_grad()
     def entropy_batch_mixing(self, **kwargs) -> torch.Tensor:
-        """Returns the object's entropy batch mixing.
-        """
+        """Returns the object's entropy batch mixing."""
         if self.gene_dataset.n_batches == 2:
             latent, batch_indices, labels = self.get_latent()
             be_score = entropy_batch_mixing(latent, batch_indices, **kwargs)
@@ -1541,8 +1540,7 @@ class Posterior:
         self, n_samples: Optional[int] = 1, give_mean: Optional[bool] = False
     ) -> Tuple:
 
-        """Estimates data's count means, dispersions and dropout logits.
-        """
+        """Estimates data's count means, dispersions and dropout logits."""
         dropout_list = []
         mean_list = []
         dispersion_list = []
