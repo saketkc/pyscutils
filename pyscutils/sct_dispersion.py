@@ -1472,7 +1472,7 @@ def RunVAE(
     ax.set_xlabel("Gene gmean")
     ax.set_ylabel("SCVI theta")
 
-    merged_df = sct_gene_pars_df.join(sct_model_pars_fit)
+    merged_df = sct_gene_pars_df.join(sct_model_pars_fit_df)
 
     ax = fig.add_subplot(122)
     ax.scatter(merged_df["gmean"], merged_df["theta"], alpha=0.5, label="Gene")
@@ -1493,21 +1493,10 @@ def RunVAE(
 
     fig.suptitle(title)
     fig.tight_layout()
-    title = title.replace(" ", "_")
+    title = title.replace(" ", "")
     if outdir:
         fig.savefig(os.path.join(outdir, "{}.pdf".format(title)))
         fig.savefig(os.path.join(outdir, "{}.png".format(title)))
-    obj_to_return = (
-        scvi_posterior,
-        scvi_latent,
-        scvi_vae,
-        scvi_trainer,
-        fig1,
-        fig2,
-        fig3,
-        fig4,
-        fig,
-    )
     sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
     mean_scvi_disp_df = pd.DataFrame(dispersion_df.mean(1), columns=["scvi_dispersion"])
     sct_disp_df = pd.read_csv(
@@ -1549,6 +1538,17 @@ def RunVAE(
     if outdir:
         fig4.savefig(os.path.join(outdir, "{}.pdf".format(title)))
         fig4.savefig(os.path.join(outdir, "{}.png".format(title)))
+    obj_to_return = (
+        scvi_posterior,
+        scvi_latent,
+        scvi_vae,
+        scvi_trainer,
+        fig1,
+        fig2,
+        fig3,
+        fig4,
+        fig,
+    )
     titles_to_return = (
         "posterior",
         "latent",
