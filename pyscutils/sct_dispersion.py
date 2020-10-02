@@ -302,29 +302,31 @@ class DecoderSCVIGeneCell(DecoderSCVI):
         px_r = self.px_r_decoder(px) if dispersion == "gene-cell" else None
         if dispersion == "gene-cell" and dispersion_clamp:
             px_r = torch.clamp(px_r, min=dispersion_clamp[0], max=dispersion_clamp[1])
-        #print("\npx_r shape: {}\n".format(px_r.shape))
+        # print("\npx_r shape: {}\n".format(px_r.shape))
         if interpolation_function:
             interpolated = interpolation_function(gene_offset.cpu().numpy())
-            #print("interpolated shape: {}".format(interpolated.shape))
+            # print("interpolated shape: {}".format(interpolated.shape))
             interpolated = (
                 torch.from_numpy(interpolated).float().to(torch.cuda.current_device())
             )
             clipped = torch.clamp(interpolated, min=1e-6)
-            #print("clipped shape: {}".format(clipped.shape))
-            clipped = clipped.repeat(px_r.shape[0],1)#torch.cat(itorch.clamp(interpolated, min=1e-6)
-            #print("clipped shape: {}".format(clipped.shape))
-            #print("clipped: {} ".format(clipped[:5, :5]))
-            #print("\n")
-            #print("orig px_r: {} ".format(px_r[:5, :5]))
-            clipped_pxr = torch.log(clipped)#interpolated
-            clipped_pxr[clipped_pxr!=clipped_pxr] = -3#1e-6
-            #print("nan: {}".format(torch.sum(torch.isnan(clipped_pxr) ) ))
-            #print("log_clipped: {}\n".format(clipped_pxr[:5, :5]))
-            clipped = torch.max(torch.min(px_r, clipped_pxr),  clipped_pxr)
+            # print("clipped shape: {}".format(clipped.shape))
+            clipped = clipped.repeat(
+                px_r.shape[0], 1
+            )  # torch.cat(itorch.clamp(interpolated, min=1e-6)
+            # print("clipped shape: {}".format(clipped.shape))
+            # print("clipped: {} ".format(clipped[:5, :5]))
+            # print("\n")
+            # print("orig px_r: {} ".format(px_r[:5, :5]))
+            clipped_pxr = torch.log(clipped)  # interpolated
+            clipped_pxr[clipped_pxr != clipped_pxr] = -3  # 1e-6
+            # print("nan: {}".format(torch.sum(torch.isnan(clipped_pxr) ) ))
+            # print("log_clipped: {}\n".format(clipped_pxr[:5, :5]))
+            clipped = torch.max(torch.min(px_r, clipped_pxr), clipped_pxr)
             px_r = clipped
-            #print("Final: {}".format(px_r[:5, :5]))
+            # print("Final: {}".format(px_r[:5, :5]))
 
-        #print("interpolated shape: {}".format(interpolated.shape))
+        # print("interpolated shape: {}".format(interpolated.shape))
         return px_scale, px_r, px_rate, px_dropout
 
 
@@ -710,7 +712,7 @@ class VAEGeneCell(nn.Module):
         elif self.gene_offset == "mean":
             gene_offset = torch.mean(x, dim=0)
         elif self.gene_offset == "gmean":
-            logX = torch.log(x+1)
+            logX = torch.log(x + 1)
             logX[torch.isnan(logX)] = 0
             gene_offset = torch.exp(torch.mean(logX, dim=0))
 
@@ -1455,6 +1457,46 @@ def RunVAE(
             header=True,
         )
 
+    sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
+    gene_cell_disp_summary_df = pd.DataFrame(
+        dispersion_df.median(1), columns=["gene_cell_mean_disp"]
+    )
+
+    merged_df = sct_gene_pars_df.join(gene_cell_disp_summary_df).dropna()
+    fig = plt.figure(figsize=(8, 4))
+    ax = fig.add_subplot(121)
+    ax.scatter(
+        merged_df["gmean"], merged_df["gene_cell_mean_disp"], alpha=0.5, label="Gene"
+    )
+    ax.legend(frameon=False)
+    ax.set_xlabel("Gene gmean")
+    ax.set_ylabel("SCVI theta")
+
+    merged_df = sct_gene_pars_df.join(sct_model_pars_fit)
+
+    ax = fig.add_subplot(122)
+    ax.scatter(merged_df["gmean"], merged_df["theta"], alpha=0.5, label="Gene")
+    ax.legend(frameon=False)  # , loc='upper left')
+    ax.set_xlabel("Gene gmean")
+    ax.set_ylabel("SCT theta")
+
+    title = "{} | ThetaVSGmean | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+        title_prefix,
+        dispersion,
+        reconstruction_loss,
+        ldvae,
+        ldvae_bias,
+        n_encoder,
+        cell_offset,
+        gene_offset,
+    )
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    title = title.replace(" ", "_")
+    if outdir:
+        fig.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig.savefig(os.path.join(outdir, "{}.png".format(title)))
     obj_to_return = (
         scvi_posterior,
         scvi_latent,
@@ -1463,7 +1505,50 @@ def RunVAE(
         fig1,
         fig2,
         fig3,
+        fig4,
+        fig,
     )
+    sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
+    mean_scvi_disp_df = pd.DataFrame(dispersion_df.mean(1), columns=["scvi_dispersion"])
+    sct_disp_df = pd.read_csv(
+        sct_cell_pars.replace("_cell_", "_model_"), sep="\t", index_col=0
+    )
+    joined_df = sct_disp_df.join(mean_scvi_disp_df)
+
+    title = "{} | Dispersion | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+        title_prefix,
+        dispersion,
+        reconstruction_loss,
+        ldvae,
+        ldvae_bias,
+        n_encoder,
+        cell_offset,
+        gene_offset,
+    )
+
+    fig4 = plt.figure(figsize=(10, 5))
+    ax = fig4.add_subplot(121)
+    ax.scatter(joined_df["theta"], joined_df["scvi_dispersion"], alpha=0.5)
+    ax.axline([0, 0], [1, 1], color="gray", linestyle="dashed")
+    ax.set_xlabel("SCT theta")
+    ax.set_ylabel("scVI theta")
+
+    ax = fig4.add_subplot(122)
+    sc.pl.umap(
+        adata,
+        color="named_clusters",
+        show=False,
+        ax=ax,
+        legend_fontweight=legend_fontweight,
+        legend_loc=legend_loc,
+        size=point_size,
+    )
+    fig4.suptitle(title)
+    fig4.tight_layout(rect=[0, 0.03, 1, 0.95])
+    title = title.replace(" ", "").replace("=", "_")
+    if outdir:
+        fig4.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig4.savefig(os.path.join(outdir, "{}.png".format(title)))
     titles_to_return = (
         "posterior",
         "latent",
@@ -1472,6 +1557,8 @@ def RunVAE(
         "cellwise_plot",
         "genewise_plot",
         "libsize_plot",
+        "dispersion_plot",
+        "thetavsgmean_plot",
     )
     return dict(zip(titles_to_return, obj_to_return))
 
