@@ -35,83 +35,6 @@ from scipy import interpolate
 ## Modifications from scVI code marked with '################ ===>'
 
 
-def compute_scvi_latent(
-    adata: sc.AnnData,
-    n_latent: int = 50,
-    n_encoder: int = 1,
-    n_epochs: int = 200,
-    lr: float = 1e-3,
-    use_batches: bool = False,
-    use_cuda: bool = False,
-    linear: bool = False,
-    cell_offset: str = "none",
-    gene_offset: str = "none",
-    ldvae_bias: bool = False,
-    reconstruction_loss: str = "zinb",
-    hvg_genes=None,
-    interpolation_function=None,
-) -> Tuple[scvi.inference.Posterior, np.ndarray]:
-    """Train and return a scVI model and sample a latent space
-
-    :param adata: sc.AnnData object non-normalized
-    :param n_latent: dimension of the latent space
-    :param n_epochs: number of training epochs
-    :param lr: learning rate
-    :param use_batches
-    :param use_cuda
-    :return: (scvi.Posterior, latent_space)
-    """
-    # Convert easily to scvi dataset
-    scviDataset = AnnDatasetFromAnnData(adata)
-    if isinstance(hvg_genes, int):
-        scviDataset.subsample_genes(hvg_genes)
-    # print(scviDataset.X.shape)
-    # print(scviDataset.X[:10,:5])
-    # print(scviDataset.raw.X.shape)
-    if isinstance(scviDataset.X, np.ndarray):
-        X = scviDataset.X
-    else:
-        X = scviDataset.X.toarray()
-    # gene_mean = torch.mean(
-    #    torch.from_numpy(X).float().to(torch.cuda.current_device()), dim=1
-    # )
-    # cell_mean = torch.mean(
-    #    torch.from_numpy(X).float().to(torch.cuda.current_device()), dim=0
-    # )
-    # Train a model
-    if not linear:
-        vae = VAEGeneCell(
-            scviDataset.nb_genes,
-            n_batch=scviDataset.n_batches * use_batches,
-            n_latent=n_latent,
-            n_layers=n_encoder,
-            cell_offset=cell_offset,
-            gene_offset=gene_offset,
-            reconstruction_loss=reconstruction_loss,
-            interpolation_function=interpolation_function,
-        )
-    else:
-        vae = LDVAEGeneCell(
-            scviDataset.nb_genes,
-            n_batch=scviDataset.n_batches * use_batches,
-            n_latent=n_latent,
-            n_layers_encoder=n_encoder,
-            cell_offset=cell_offset,
-            gene_offset=gene_offset,
-            bias=ldvae_bias,
-            reconstruction_loss=reconstruction_loss,
-        )
-    trainer = UnsupervisedTrainer(vae, scviDataset, train_size=1.0, use_cuda=use_cuda)
-    trainer.train(n_epochs=n_epochs, lr=lr)
-
-    # Extract latent space
-    posterior = trainer.create_posterior(
-        trainer.model, scviDataset, indices=np.arange(len(scviDataset))
-    ).sequential()
-
-    latent, _, _ = posterior.get_latent()
-
-    return posterior, latent, vae, trainer
 
 
 # Decoder
@@ -950,6 +873,7 @@ def compute_scvi_latent(
     point_size=10,
     dispersion_clamp=[],
     interpolation_function=None,
+    genes_to_keep = "all",
 ) -> Tuple[scvi.inference.Posterior, np.ndarray]:
     """Train and return a scVI model and sample a latent space
 
@@ -962,9 +886,12 @@ def compute_scvi_latent(
     :return: (scvi.Posterior, latent_space)
     """
     # Convert easily to scvi dataset
+    print("use_cuda: {}".format(use_cuda))
     scviDataset = AnnDatasetFromAnnData(adata)
     if isinstance(hvg_genes, int):
         scviDataset.subsample_genes(hvg_genes)
+    if genes_to_keep!="all":
+        scviDataset.filter_genes_by_attribute(genes_to_keep)
 
     if isinstance(scviDataset.X, np.ndarray):
         X = scviDataset.X
@@ -1027,13 +954,14 @@ def RunVAE(
     n_epochs=200,
     lr=1e-3,
     batch_size=1000,
-    use_cuda=True,
+    use_cuda=False,
     legend_loc="on data",
     figsize=(10, 5),
     legend_fontweight="normal",
     sct_cell_pars=None,
     sct_gene_pars=None,
     sct_model_pars_fit=None,
+    genes_to_keep="all",
     outdir=None,
     dispersion_clamp=[],
 ):
@@ -1060,6 +988,7 @@ def RunVAE(
         hvg_genes=hvg_genes,
         dispersion_clamp=dispersion_clamp,
         interpolation_function=interpolation_function,
+        genes_to_keep=genes_to_keep,
     )
 
     suffix = "_{}_{}_{}_{}".format(
@@ -1068,7 +997,8 @@ def RunVAE(
     scviDataset = AnnDatasetFromAnnData(adata)
     if isinstance(hvg_genes, int):
         scviDataset.subsample_genes(hvg_genes)
-
+    if genes_to_keep!="all":
+        scviDataset.filter_genes_by_attribute(genes_to_keep)
     # posterior freq of genes per cell
     # scale = scvi_posterior.sequential(batch_size=batch_size).get_sample_scale()
     # scale = scale.detach()
@@ -1078,44 +1008,12 @@ def RunVAE(
         scale += scvi_posterior.get_sample_scale()
     scale /= 100
 
-    """
-    dropout, means, dispersions = scvi_posterior.sequential().generate_parameters()
-    for _ in range(9):
-        (
-            dropout_x,
-            means_x,
-            dispersions_x,
-        ) = scvi_posterior.sequential().generate_parameters()
-        # batch_size=batch_size
-        dropout += dropout_x
-        means += means_x
-        dispersions += dispersions_x
-    dropout /= 10
-    means /= 10
-    dispersions /= 10
-    """
 
     scale_df = pd.DataFrame(scale)
     scale_df.index = list(adata.obs_names)
     scale_df.columns = list(scviDataset.gene_ids)
     scale_df = scale_df.T
-    """
-    means_df = pd.DataFrame(means)
-    means_df.index = list(adata.obs_names)
-    means_df.columns = list(scviDataset.gene_ids)
-    means_df = means_df.T
 
-    dropout_df = pd.DataFrame(dropout)
-    dropout_df.index = list(adata.obs_names)
-    dropout_df.columns = list(scviDataset.gene_ids)
-    dropout_df = dropout_df.T
-
-
-    dispersions_df = pd.DataFrame(dispersions[0])
-    dispersions_df.index = list(adata.obs_names)
-    dispersions_df.columns = list(scviDataset.gene_ids)
-    dispersions_df = dispersions_df.T
-    """
     scvi_latent_df = pd.DataFrame(scvi_latent)
     scvi_latent_df.index = list(adata.obs_names)
     if outdir:
@@ -1165,6 +1063,8 @@ def RunVAE(
     scviDataset = AnnDatasetFromAnnData(adata)
     if isinstance(hvg_genes, int):
         scviDataset.subsample_genes(hvg_genes)
+    if genes_to_keep!="all":
+        scviDataset.filter_genes_by_attribute(genes_to_keep)
 
     if isinstance(scviDataset.X, np.ndarray):
         X = scviDataset.X
@@ -1198,6 +1098,8 @@ def RunVAE(
 
     gene_loss = np.nansum(reconst_loss.detach().cpu().numpy(), axis=0)
     cell_loss = np.nansum(reconst_loss.detach().cpu().numpy(), axis=1)
+
+
 
     gene_mean = np.array(adata[:, scviDataset.gene_names].X.mean(0))[0]
     if not gene_mean.shape:
@@ -1233,15 +1135,6 @@ def RunVAE(
             index=True,
             header=True,
         )
-    """
-    texts = []
-    for x, y, gene in zip(gene_mean, gene_loss, scviDataset.gene_names):
-        if (y < -500 and x >= 1) or (y < -700):
-            #if gene in PAIRWISE_MARKERS_BOTTLENECK_CLUSTER_genes:
-            texts.append(plt.text(x, y, gene, size=8, color="red"))
-
-    adjust_text(texts, arrowprops=dict(arrowstyle="-", color="k", lw=0.5))
-    """
     ax.set_xlabel("Mean counts")
     ax.set_ylabel("Reconstuction loss")
     ax.legend(scatterpoints=1)
@@ -1436,6 +1329,13 @@ def RunVAE(
     dispersion_df.index = list(adata.obs_names)
     dispersion_df.columns = list(scviDataset.gene_names)
     dispersion_df = dispersion_df.T
+
+
+    reconst_loss_df = pd.DataFrame(reconst_loss.detach().cpu().numpy())
+    reconst_loss_df.index = list(adata.obs_names)
+    reconst_loss_df.columns = list(scviDataset.gene_names)
+    reconst_loss_df = reconst_loss_df.T
+
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         means_df.to_csv(
@@ -1452,6 +1352,12 @@ def RunVAE(
         )
         dispersion_df.to_csv(
             os.path.join(outdir, "SCVI_dispersions_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
+        )
+        reconst_loss_df.to_csv(
+            os.path.join(outdir, "SCVI_reconstloss_df_{}.tsv".format(suffix)),
             sep="\t",
             index=True,
             header=True,
@@ -1578,7 +1484,8 @@ def RunSCVIWithSCT(
     hvg_genes=3000,
     ldvae=False,
     ldvae_bias=False,
-    use_cuda=True,
+    use_cuda=False,
+    genes_to_exclude_file=None,
     lr=1e-3,
     **kwargs,
 ):
@@ -1589,7 +1496,14 @@ def RunSCVIWithSCT(
 
     sct_model_pars_fit = sct_cell_pars.replace("cell_pars", "model_pars_fit")
     sct_gene_pars = sct_cell_pars.replace("cell_pars", "gene_attrs")
+    genes_to_keep = "all"
+    if genes_to_exclude_file:
+        genes_to_exclude_df = pd.read_csv(genes_to_exclude_file, sep="\t", index_col=0)
+        genes_to_exclude = genes_to_exclude_df.index.tolist()
+        all_genes = adata.var_names
 
+        genes_to_keep = list(set(all_genes).difference(genes_to_exclude))
+        adata = adata[:, genes_to_keep]
     results = RunVAE(
         adata,
         reconstruction_loss,
@@ -1606,6 +1520,7 @@ def RunSCVIWithSCT(
         sct_cell_pars=sct_cell_pars,
         sct_gene_pars=sct_gene_pars,
         sct_model_pars_fit=sct_model_pars_fit,
+        genes_to_keep=genes_to_keep,
         outdir=outdir,
         **kwargs,
     )

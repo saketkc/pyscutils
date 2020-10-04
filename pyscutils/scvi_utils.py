@@ -989,14 +989,19 @@ def RunVAE(
     n_epochs=200,
     lr=1e-3,
     batch_size=1000,
-    use_cuda=True,
+    use_cuda=False,
     legend_loc="on data",
     figsize=(10, 5),
     legend_fontweight="normal",
     sct_cell_pars=None,
     outdir=None,
+    sct_gene_pars=None,
+    sct_model_pars_fit=None,
     dispersion_clamp=[],
 ):
+    sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
+    sct_model_pars_fit_df = pd.read_csv(sct_model_pars_fit, sep="\t", index_col=0)
+    sct_model_paras_withgmean = sct_model_pars_fit_df.join(sct_gene_pars_df)
 
     scvi_posterior, scvi_latent, scvi_vae, scvi_trainer = compute_scvi_latent(
         adata,
@@ -1029,44 +1034,11 @@ def RunVAE(
         scale += scvi_posterior.get_sample_scale()
     scale /= 100
 
-    """
-    dropout, means, dispersions = scvi_posterior.sequential().generate_parameters()
-    for _ in range(9):
-        (
-            dropout_x,
-            means_x,
-            dispersions_x,
-        ) = scvi_posterior.sequential().generate_parameters()
-        # batch_size=batch_size
-        dropout += dropout_x
-        means += means_x
-        dispersions += dispersions_x
-    dropout /= 10
-    means /= 10
-    dispersions /= 10
-    """
-
     scale_df = pd.DataFrame(scale)
     scale_df.index = list(adata.obs_names)
     scale_df.columns = list(scviDataset.gene_ids)
     scale_df = scale_df.T
-    """
-    means_df = pd.DataFrame(means)
-    means_df.index = list(adata.obs_names)
-    means_df.columns = list(scviDataset.gene_ids)
-    means_df = means_df.T
 
-    dropout_df = pd.DataFrame(dropout)
-    dropout_df.index = list(adata.obs_names)
-    dropout_df.columns = list(scviDataset.gene_ids)
-    dropout_df = dropout_df.T
-
-
-    dispersions_df = pd.DataFrame(dispersions[0])
-    dispersions_df.index = list(adata.obs_names)
-    dispersions_df.columns = list(scviDataset.gene_ids)
-    dispersions_df = dispersions_df.T
-    """
     scvi_latent_df = pd.DataFrame(scvi_latent)
     scvi_latent_df.index = list(adata.obs_names)
     if outdir:
@@ -1083,26 +1055,6 @@ def RunVAE(
             index=True,
             header=True,
         )
-        """
-        means_df.to_csv(
-            os.path.join(outdir, "SCVI_means_df_{}.tsv".format(suffix)),
-            sep="\t",
-            index=True,
-            header=True,
-        )
-        dropout_df.to_csv(
-            os.path.join(outdir, "SCVI_dropout_df_{}.tsv".format(suffix)),
-            sep="\t",
-            index=True,
-            header=True,
-        )
-        dispersions_df.to_csv(
-            os.path.join(outdir, "SCVI_dispersions_df_{}.tsv".format(suffix)),
-            sep="\t",
-            index=True,
-            header=True,
-        )
-        """
 
     adata.obsm["X_scvi"] = scvi_latent
 
@@ -1184,15 +1136,6 @@ def RunVAE(
             index=True,
             header=True,
         )
-    """
-    texts = []
-    for x, y, gene in zip(gene_mean, gene_loss, scviDataset.gene_names):
-        if (y < -500 and x >= 1) or (y < -700):
-            #if gene in PAIRWISE_MARKERS_BOTTLENECK_CLUSTER_genes:
-            texts.append(plt.text(x, y, gene, size=8, color="red"))
-
-    adjust_text(texts, arrowprops=dict(arrowstyle="-", color="k", lw=0.5))
-    """
     ax.set_xlabel("Mean counts")
     ax.set_ylabel("Reconstuction loss")
     ax.legend(scatterpoints=1)
@@ -1387,6 +1330,10 @@ def RunVAE(
     dispersion_df.index = list(adata.obs_names)
     dispersion_df.columns = list(scviDataset.gene_names)
     dispersion_df = dispersion_df.T
+    reconst_loss_df = pd.DataFrame(reconst_loss.detach().cpu().numpy())
+    reconst_loss_df.index = list(adata.obs_names)
+    reconst_loss_df.columns = list(scviDataset.gene_names)
+    reconst_loss_df = reconst_loss_df.T
     if outdir:
         os.makedirs(outdir, exist_ok=True)
         means_df.to_csv(
@@ -1403,6 +1350,12 @@ def RunVAE(
         )
         dispersion_df.to_csv(
             os.path.join(outdir, "SCVI_dispersions_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
+        )
+        reconst_loss_df.to_csv(
+            os.path.join(outdir, "SCVI_reconstloss_df_{}.tsv".format(suffix)),
             sep="\t",
             index=True,
             header=True,
@@ -1426,6 +1379,87 @@ def RunVAE(
         "genewise_plot",
         "libsize_plot",
     )
+    sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
+    gene_cell_disp_summary_df = pd.DataFrame(
+        dispersion_df.median(1), columns=["gene_cell_mean_disp"]
+    )
+
+    merged_df = sct_gene_pars_df.join(gene_cell_disp_summary_df).dropna()
+    fig = plt.figure(figsize=(8, 4))
+    ax = fig.add_subplot(121)
+    ax.scatter(
+        merged_df["gmean"], merged_df["gene_cell_mean_disp"], alpha=0.5, label="Gene"
+    )
+    ax.legend(frameon=False)
+    ax.set_xlabel("Gene gmean")
+    ax.set_ylabel("SCVI theta")
+
+    merged_df = sct_gene_pars_df.join(sct_model_pars_fit_df)
+
+    ax = fig.add_subplot(122)
+    ax.scatter(merged_df["gmean"], merged_df["theta"], alpha=0.5, label="Gene")
+    ax.legend(frameon=False)  # , loc='upper left')
+    ax.set_xlabel("Gene gmean")
+    ax.set_ylabel("SCT theta")
+
+    title = "{} | ThetaVSGmean | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+        title_prefix,
+        dispersion,
+        reconstruction_loss,
+        ldvae,
+        ldvae_bias,
+        n_encoder,
+        cell_offset,
+        gene_offset,
+    )
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    title = title.replace(" ", "")
+    if outdir:
+        fig.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig.savefig(os.path.join(outdir, "{}.png".format(title)))
+    sct_library_sizes = pd.read_csv(sct_cell_pars, sep="\t")
+    mean_scvi_disp_df = pd.DataFrame(dispersion_df.mean(1), columns=["scvi_dispersion"])
+    sct_disp_df = pd.read_csv(
+        sct_cell_pars.replace("_cell_", "_model_"), sep="\t", index_col=0
+    )
+    joined_df = sct_disp_df.join(mean_scvi_disp_df)
+
+    title = "{} | Dispersion | disp:{} | loss:{} | ldvae:{}({}) | n_enc:{} | c_ofst:{} | g_ofst:{}".format(
+        title_prefix,
+        dispersion,
+        reconstruction_loss,
+        ldvae,
+        ldvae_bias,
+        n_encoder,
+        cell_offset,
+        gene_offset,
+    )
+
+    fig4 = plt.figure(figsize=(10, 5))
+    ax = fig4.add_subplot(121)
+    ax.scatter(joined_df["theta"], joined_df["scvi_dispersion"], alpha=0.5)
+    ax.axline([0, 0], [1, 1], color="gray", linestyle="dashed")
+    ax.set_xlabel("SCT theta")
+    ax.set_ylabel("scVI theta")
+
+    ax = fig4.add_subplot(122)
+    sc.pl.umap(
+        adata,
+        color="named_clusters",
+        show=False,
+        ax=ax,
+        legend_fontweight=legend_fontweight,
+        legend_loc=legend_loc,
+        size=point_size,
+    )
+    fig4.suptitle(title)
+    fig4.tight_layout(rect=[0, 0.03, 1, 0.95])
+    title = title.replace(" ", "").replace("=", "_")
+    if outdir:
+        fig4.savefig(os.path.join(outdir, "{}.pdf".format(title)))
+        fig4.savefig(os.path.join(outdir, "{}.png".format(title)))
     return dict(zip(titles_to_return, obj_to_return))
 
 
@@ -1445,6 +1479,7 @@ def RunSCVI(
     ldvae=False,
     ldvae_bias=False,
     use_cuda=True,
+    genes_to_exclude_file=None,
     lr=1e-3,
     **kwargs,
 ):
@@ -1452,6 +1487,16 @@ def RunSCVI(
     metadata = pd.read_csv(metadata_file, sep="\t", index_col=0)
     adata.obs["named_clusters"] = metadata[idents_col]
     n_epochs = np.min([round((20000 / adata.n_obs) * 400), 400])
+    sct_model_pars_fit = sct_cell_pars.replace("cell_pars", "model_pars_fit")
+    sct_gene_pars = sct_cell_pars.replace("cell_pars", "gene_attrs")
+
+    if genes_to_exclude_file:
+        genes_to_exclude_df = pd.read_csv(genes_to_exclude_file, sep="\t", index_col=0)
+        genes_to_exclude = genes_to_exclude_df.index.tolist()
+        all_genes = adata.var_names
+
+        genes_to_keep = list(set(all_genes).difference(genes_to_exclude))
+        adata = adata[:, genes_to_keep]
 
     results = RunVAE(
         adata,
@@ -1467,6 +1512,8 @@ def RunSCVI(
         dispersion=dispersion,
         use_cuda=use_cuda,
         sct_cell_pars=sct_cell_pars,
+        sct_gene_pars=sct_gene_pars,
+        sct_model_pars_fit=sct_model_pars_fit,
         outdir=outdir,
         **kwargs,
     )
