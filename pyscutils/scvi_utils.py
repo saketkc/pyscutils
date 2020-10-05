@@ -423,6 +423,7 @@ class VAEGeneCell(nn.Module):
         cell_offset: str = "none",  ################ ===>
         gene_offset: str = "none",  ################ ===>
         dispersion_clamp: list = [],
+        beta_disentanglement: int =1,
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -433,6 +434,7 @@ class VAEGeneCell(nn.Module):
         self.n_batch = n_batch
         self.n_labels = n_labels
         self.latent_distribution = latent_distribution
+        self.beta_disentanglement = beta_disentanglement
 
         ################ ===>
         self.cell_offset = cell_offset
@@ -762,7 +764,7 @@ class VAEGeneCell(nn.Module):
             Normal(local_l_mean, torch.sqrt(local_l_var)),
         ).sum(dim=1)
 
-        kl_divergence = kl_divergence_z
+        kl_divergence = kl_divergence_z * self.beta_disentanglement
 
         reconst_loss = self.get_reconstruction_loss(
             x,
