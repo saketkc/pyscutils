@@ -423,7 +423,7 @@ class VAEGeneCell(nn.Module):
         cell_offset: str = "none",  ################ ===>
         gene_offset: str = "none",  ################ ===>
         dispersion_clamp: list = [],
-        beta_disentanglement: int =1,
+        beta_disentanglement: float = 1.0,
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -915,6 +915,7 @@ def compute_scvi_latent(
     hvg_genes="all",
     point_size=10,
     dispersion_clamp=[],
+    beta_disentanglement=1.0,
 ) -> Tuple[scvi.inference.Posterior, np.ndarray]:
     """Train and return a scVI model and sample a latent space
 
@@ -948,6 +949,7 @@ def compute_scvi_latent(
             reconstruction_loss=reconstruction_loss,
             dispersion=dispersion,
             dispersion_clamp=dispersion_clamp,
+            beta_disentanglement=beta_disentanglement,
         )
     else:
         vae = LDVAEGeneCell(
@@ -1000,6 +1002,7 @@ def RunVAE(
     sct_gene_pars=None,
     sct_model_pars_fit=None,
     dispersion_clamp=[],
+    beta_disentanglement=1.0,
 ):
     sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
     sct_model_pars_fit_df = pd.read_csv(sct_model_pars_fit, sep="\t", index_col=0)
@@ -1018,6 +1021,7 @@ def RunVAE(
         dispersion=dispersion,
         hvg_genes=hvg_genes,
         dispersion_clamp=dispersion_clamp,
+        beta_disentanglement=beta_disentanglement,
     )
 
     suffix = "_{}_{}_{}_{}".format(
@@ -1066,6 +1070,16 @@ def RunVAE(
     sc.pp.neighbors(adata, use_rep="X_scvi", n_neighbors=20, n_pcs=30)
     sc.tl.umap(adata, min_dist=0.3)
     sc.tl.leiden(adata, key_added="X_scvi", resolution=0.8)
+    X_umap = adata.obsm["X_umap"]
+    X_umap_df = pd.DataFrame(X_umap)
+    X_umap_df.index = list(adata.obs_names)
+    if outdir:
+        X_umap_df.to_csv(
+            os.path.join(outdir, "SCVI_Xumap_df_{}.tsv".format(suffix)),
+            sep="\t",
+            index=True,
+            header=True,
+        )
 
     scviDataset = AnnDatasetFromAnnData(adata)
     if isinstance(hvg_genes, int):
@@ -1125,6 +1139,7 @@ def RunVAE(
     cell_loss_df = cell_loss_df.T
     cell_loss_df.index = list(adata.obs_names)
     cell_loss_df.columns = ["cell_mean", "cell_loss"]
+
     if outdir:
         gene_loss_df.to_csv(
             os.path.join(outdir, "SCVI_geneloss_df_{}.tsv".format(suffix)),
