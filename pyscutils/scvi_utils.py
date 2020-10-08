@@ -424,6 +424,7 @@ class VAEGeneCell(nn.Module):
         gene_offset: str = "none",  ################ ===>
         dispersion_clamp: list = [],
         beta_disentanglement: float = 1.0,
+        kl_type: str = "reverse",
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -434,12 +435,13 @@ class VAEGeneCell(nn.Module):
         self.n_batch = n_batch
         self.n_labels = n_labels
         self.latent_distribution = latent_distribution
-        self.beta_disentanglement = beta_disentanglement
 
         ################ ===>
         self.cell_offset = cell_offset
         self.gene_offset = gene_offset
         self.dispersion_clamp = dispersion_clamp
+        self.beta_disentanglement = beta_disentanglement
+        self.kl_type = kl_type
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
@@ -756,9 +758,21 @@ class VAEGeneCell(nn.Module):
         mean = torch.zeros_like(qz_m)
         scale = torch.ones_like(qz_v)
 
-        kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)).sum(
-            dim=1
-        )
+        # only use it on mean
+        if self.kl_type == "reverse":
+            kl_divergence_z = kl(
+                Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)
+            ).sum(dim=1)
+        elif self.kl_type == "forward":
+            kl_divergence_z = kl(
+                Normal(mean, scale), Normal(qz_m, torch.sqrt(qz_v))
+            ).sum(dim=1)
+        elif self.kl_type == "symmetric":
+            p_sum_q = 0.5 * (Normal(mean, scale) + Normal(qz_m, torch.sqrt(qz_v)))
+            kl_divergence_z_f = kl(Normal(mean, scale), p_sum_q).sum(dim=1)
+            kl_divergence_z_r = kl(Normal(qz_m, torch.sqrt(qz_v)), p_sum_q).sum(dim=1)
+            kl_divergence = 0.5 * (kl_divergence_z_f + kl_divergence_z_r)
+
         kl_divergence_l = kl(
             Normal(ql_m, torch.sqrt(ql_v)),
             Normal(local_l_mean, torch.sqrt(local_l_var)),
@@ -916,6 +930,7 @@ def compute_scvi_latent(
     point_size=10,
     dispersion_clamp=[],
     beta_disentanglement=1.0,
+    kl_type="reverse",
 ) -> Tuple[scvi.inference.Posterior, np.ndarray]:
     """Train and return a scVI model and sample a latent space
 
@@ -950,6 +965,7 @@ def compute_scvi_latent(
             dispersion=dispersion,
             dispersion_clamp=dispersion_clamp,
             beta_disentanglement=beta_disentanglement,
+            kl_type=kl_type,
         )
     else:
         vae = LDVAEGeneCell(
@@ -1003,6 +1019,7 @@ def RunVAE(
     sct_model_pars_fit=None,
     dispersion_clamp=[],
     beta_disentanglement=1.0,
+    kl_type="reverse",
 ):
     sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
     sct_model_pars_fit_df = pd.read_csv(sct_model_pars_fit, sep="\t", index_col=0)
@@ -1022,6 +1039,7 @@ def RunVAE(
         hvg_genes=hvg_genes,
         dispersion_clamp=dispersion_clamp,
         beta_disentanglement=beta_disentanglement,
+        kl_type=kl_type,
     )
 
     suffix = "_{}_{}_{}_{}".format(
