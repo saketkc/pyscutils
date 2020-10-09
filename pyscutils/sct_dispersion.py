@@ -381,6 +381,7 @@ class VAEGeneCell(nn.Module):
         dispersion_clamp: list = [],
         interpolation_function: torch.Tensor = None,
         beta_disentanglement: float = 1.0,
+        kl_type: str = "reverse",
     ):
         super().__init__()
         self.dispersion = dispersion
@@ -398,6 +399,7 @@ class VAEGeneCell(nn.Module):
         self.dispersion_clamp = dispersion_clamp
         self.interpolation_function = interpolation_function
         self.beta_disentanglement = beta_disentanglement
+        self.kl_type = kl_type
 
         if self.dispersion == "gene":
             self.px_r = torch.nn.Parameter(torch.randn(n_input))
@@ -718,10 +720,20 @@ class VAEGeneCell(nn.Module):
         # KL Divergence
         mean = torch.zeros_like(qz_m)
         scale = torch.ones_like(qz_v)
+        if self.kl_type == "reverse":
+            kl_divergence_z = kl(
+                Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)
+            ).sum(dim=1)
+        elif self.kl_type == "forward":
+            kl_divergence_z = kl(
+                Normal(mean, scale), Normal(qz_m, torch.sqrt(qz_v))
+            ).sum(dim=1)
+        elif self.kl_type == "symmetric":
+            p_sum_q = Normal(mean + qz_m, scale + torch.sqrt(qz_v))
+            kl_divergence_z_f = kl(Normal(mean, scale), p_sum_q).sum(dim=1)
+            kl_divergence_z_r = kl(Normal(qz_m, torch.sqrt(qz_v)), p_sum_q).sum(dim=1)
+            kl_divergence_z = 0.5 * (kl_divergence_z_f + kl_divergence_z_r)
 
-        kl_divergence_z = kl(Normal(qz_m, torch.sqrt(qz_v)), Normal(mean, scale)).sum(
-            dim=1
-        )
         kl_divergence_l = kl(
             Normal(ql_m, torch.sqrt(ql_v)),
             Normal(local_l_mean, torch.sqrt(local_l_var)),
@@ -881,6 +893,7 @@ def compute_scvi_latent(
     interpolation_function=None,
     genes_to_keep="all",
     beta_disentanglement=1.0,
+    kl_type="reverse",
 ) -> Tuple[scvi.inference.Posterior, np.ndarray]:
     """Train and return a scVI model and sample a latent space
 
@@ -973,6 +986,7 @@ def RunVAE(
     outdir=None,
     dispersion_clamp=[],
     beta_disentanglement=1.0,
+    kl_type="reverse",
 ):
     sct_gene_pars_df = pd.read_csv(sct_gene_pars, sep="\t", index_col=0)
     sct_model_pars_fit_df = pd.read_csv(sct_model_pars_fit, sep="\t", index_col=0)
@@ -999,6 +1013,7 @@ def RunVAE(
         interpolation_function=interpolation_function,
         genes_to_keep=genes_to_keep,
         beta_disentanglement=beta_disentanglement,
+        kl_type=kl_type,
     )
 
     suffix = "_{}_{}_{}_{}".format(
@@ -1503,7 +1518,9 @@ def RunSCVIWithSCT(
     use_cuda=False,
     genes_to_exclude_file=None,
     lr=1e-3,
+    kl_type="reverse",
     **kwargs,
+
 ):
     adata = sc.read_10x_mtx(counts_dir)
     metadata = pd.read_csv(metadata_file, sep="\t", index_col=0)
@@ -1538,6 +1555,7 @@ def RunSCVIWithSCT(
         sct_model_pars_fit=sct_model_pars_fit,
         genes_to_keep=genes_to_keep,
         outdir=outdir,
+        kl_type=kl_type,
         **kwargs,
     )
     return results

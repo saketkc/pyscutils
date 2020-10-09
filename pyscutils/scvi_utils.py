@@ -768,10 +768,10 @@ class VAEGeneCell(nn.Module):
                 Normal(mean, scale), Normal(qz_m, torch.sqrt(qz_v))
             ).sum(dim=1)
         elif self.kl_type == "symmetric":
-            p_sum_q = 0.5 * (Normal(mean, scale) + Normal(qz_m, torch.sqrt(qz_v)))
+            p_sum_q = Normal(mean + qz_m, scale + torch.sqrt(qz_v))
             kl_divergence_z_f = kl(Normal(mean, scale), p_sum_q).sum(dim=1)
             kl_divergence_z_r = kl(Normal(qz_m, torch.sqrt(qz_v)), p_sum_q).sum(dim=1)
-            kl_divergence = 0.5 * (kl_divergence_z_f + kl_divergence_z_r)
+            kl_divergence_z = 0.5 * (kl_divergence_z_f + kl_divergence_z_r)
 
         kl_divergence_l = kl(
             Normal(ql_m, torch.sqrt(ql_v)),
@@ -1516,6 +1516,7 @@ def RunSCVI(
     use_cuda=True,
     genes_to_exclude_file=None,
     lr=1e-3,
+    kl_type="reverse",
     **kwargs,
 ):
     adata = sc.read_10x_mtx(counts_dir)
@@ -1550,6 +1551,7 @@ def RunSCVI(
         sct_gene_pars=sct_gene_pars,
         sct_model_pars_fit=sct_model_pars_fit,
         outdir=outdir,
+        kl_type=kl_type,
         **kwargs,
     )
     return results
