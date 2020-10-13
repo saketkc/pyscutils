@@ -1520,7 +1520,6 @@ def RunSCVIWithSCT(
     lr=1e-3,
     kl_type="reverse",
     **kwargs,
-
 ):
     adata = sc.read_10x_mtx(counts_dir)
     metadata = pd.read_csv(metadata_file, sep="\t", index_col=0)
